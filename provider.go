@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/sirupsen/logrus"
 )
 
 //
@@ -28,7 +30,7 @@ type ConsumerGetter func(key string, header map[string]string) (*Consumer, error
 // Provider provides methods for a 2-legged Oauth1 provider
 type Provider struct {
 	ConsumerGetter ConsumerGetter
-
+	logEntry       *logrus.Entry
 	// For mocking
 	clock clock
 }
@@ -37,8 +39,8 @@ type Provider struct {
 // Returns a Provider
 func NewProvider(secretGetter ConsumerGetter) *Provider {
 	provider := &Provider{
-		secretGetter,
-		&defaultClock{},
+		ConsumerGetter: secretGetter,
+		clock:          &defaultClock{},
 	}
 	return provider
 }
@@ -53,6 +55,9 @@ func makeURLAbs(url *url.URL, request *http.Request) {
 			url.Scheme = "http"
 		}
 	}
+}
+func (provider *Provider) SetLogEntry(logEntry *logrus.Entry) {
+	provider.logEntry = logEntry
 }
 
 // IsAuthorized takes an *http.Request and returns a pointer to a string containing the consumer key,
@@ -104,6 +109,9 @@ func (provider *Provider) IsAuthorized(request *http.Request) (*string, error) {
 	consumer, err := provider.ConsumerGetter(consumerKey, userParams)
 	if err != nil {
 		return nil, err
+	}
+	if provider.logEntry != nil {
+		consumer.SetLogEntry(provider.logEntry)
 	}
 
 	// Make sure timestamp is no more than 10 digits

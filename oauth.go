@@ -56,6 +56,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -197,7 +199,8 @@ type Consumer struct {
 	// 	}
 	AdditionalAuthorizationUrlParams map[string]string
 
-	debug bool
+	debug    bool
+	logEntry *logrus.Entry
 
 	// Defaults to http.Client{}, can be overridden (e.g. for testing) as necessary
 	HttpClient HttpClient
@@ -219,7 +222,9 @@ func newConsumer(consumerKey string, serviceProvider ServiceProvider, httpClient
 	if httpClient == nil {
 		httpClient = &http.Client{}
 	}
+
 	return &Consumer{
+		logEntry:        logrus.NewEntry(logrus.New()),
 		consumerKey:     consumerKey,
 		serviceProvider: serviceProvider,
 		clock:           clock,
@@ -244,6 +249,7 @@ func NewConsumer(consumerKey string, consumerSecret string,
 	consumer := newConsumer(consumerKey, serviceProvider, nil)
 
 	consumer.signer = &HMACSigner{
+		logEntry:       consumer.logEntry,
 		consumerSecret: consumerSecret,
 		hashFunc:       crypto.SHA1,
 	}
@@ -269,6 +275,7 @@ func NewCustomHttpClientConsumer(consumerKey string, consumerSecret string,
 	consumer := newConsumer(consumerKey, serviceProvider, httpClient)
 
 	consumer.signer = &HMACSigner{
+		logEntry:       consumer.logEntry,
 		consumerSecret: consumerSecret,
 		hashFunc:       crypto.SHA1,
 	}
@@ -298,6 +305,7 @@ func NewCustomConsumer(consumerKey string, consumerSecret string,
 	consumer := newConsumer(consumerKey, serviceProvider, httpClient)
 
 	consumer.signer = &HMACSigner{
+		logEntry:       consumer.logEntry,
 		consumerSecret: consumerSecret,
 		hashFunc:       hashFunc,
 	}
@@ -321,6 +329,7 @@ func NewRSAConsumer(consumerKey string, privateKey *rsa.PrivateKey,
 	consumer := newConsumer(consumerKey, serviceProvider, nil)
 
 	consumer.signer = &RSASigner{
+		logEntry:   consumer.logEntry,
 		privateKey: privateKey,
 		hashFunc:   crypto.SHA1,
 		rand:       cryptoRand.Reader,
@@ -354,6 +363,7 @@ func NewCustomRSAConsumer(consumerKey string, privateKey *rsa.PrivateKey,
 	consumer := newConsumer(consumerKey, serviceProvider, httpClient)
 
 	consumer.signer = &RSASigner{
+		logEntry:   consumer.logEntry,
 		privateKey: privateKey,
 		hashFunc:   hashFunc,
 		rand:       cryptoRand.Reader,
@@ -627,8 +637,13 @@ func (c *Consumer) Put(url string, body string, userParams map[string]string, to
 	return c.makeAuthorizedRequest("PUT", url, LOC_URL, body, userParams, token)
 }
 
+func (c *Consumer) SetLogEntry(logEntry *logrus.Entry) {
+	c.logEntry = logEntry
+	c.signer.SetLogEntry(logEntry)
+}
 func (c *Consumer) Debug(enabled bool) {
 	c.debug = enabled
+
 	c.signer.Debug(enabled)
 }
 
@@ -941,7 +956,8 @@ func (rt *RoundTripper) RoundTrip(userRequest *http.Request) (*http.Response, er
 	serverRequest.Header.Add(HTTP_AUTH_HEADER, oauthHdr)
 
 	if rt.consumer.debug {
-		fmt.Printf("Request: %v\n", serverRequest)
+
+		rt.consumer.logEntry.Infof("Request: %v\n", serverRequest)
 	}
 
 	resp, err := rt.consumer.HttpClient.Do(serverRequest)
@@ -982,6 +998,7 @@ type key interface {
 }
 
 type signer interface {
+	SetLogEntry(logEntry *logrus.Entry)
 	Sign(message string, tokenSecret string) (string, error)
 	Verify(message string, signature string) error
 	SignatureMethod() string
@@ -1088,11 +1105,15 @@ func parseAdditionalData(parts url.Values) map[string]string {
 }
 
 type HMACSigner struct {
+	debug          bool
+	logEntry       *logrus.Entry
 	consumerSecret string
 	hashFunc       crypto.Hash
-	debug          bool
 }
 
+func (s *HMACSigner) SetLogEntry(logEntry *logrus.Entry) {
+	s.logEntry = logEntry
+}
 func (s *HMACSigner) Debug(enabled bool) {
 	s.debug = enabled
 }
@@ -1100,8 +1121,10 @@ func (s *HMACSigner) Debug(enabled bool) {
 func (s *HMACSigner) Sign(message string, tokenSecret string) (string, error) {
 	key := escape(s.consumerSecret) + "&" + escape(tokenSecret)
 	if s.debug {
-		fmt.Println("Signing:", message)
-		fmt.Println("Key:", key)
+
+		s.logEntry.Info("Signing:", message)
+		s.logEntry.Info("Key:", key)
+
 	}
 
 	h := hmac.New(s.HashFunc().New, []byte(key))
@@ -1110,14 +1133,18 @@ func (s *HMACSigner) Sign(message string, tokenSecret string) (string, error) {
 
 	base64signature := base64.StdEncoding.EncodeToString(rawSignature)
 	if s.debug {
-		fmt.Println("Base64 signature:", base64signature)
+
+		s.logEntry.Info("Base64 signature:", base64signature)
+
 	}
 	return base64signature, nil
 }
 
 func (s *HMACSigner) Verify(message string, signature string) error {
 	if s.debug {
-		fmt.Println("Verifying Base64 signature:", signature)
+
+		s.logEntry.Info("Verifying Base64 signature:", signature)
+
 	}
 	validSignature, err := s.Sign(message, "")
 	if err != nil {
@@ -1144,18 +1171,24 @@ func (s *HMACSigner) HashFunc() crypto.Hash {
 
 type RSASigner struct {
 	debug      bool
+	logEntry   *logrus.Entry
 	rand       io.Reader
 	privateKey *rsa.PrivateKey
 	hashFunc   crypto.Hash
 }
 
+func (s *RSASigner) SetLogEntry(logEntry *logrus.Entry) {
+	s.logEntry = logEntry
+}
 func (s *RSASigner) Debug(enabled bool) {
 	s.debug = enabled
 }
 
 func (s *RSASigner) Sign(message string, tokenSecret string) (string, error) {
 	if s.debug {
-		fmt.Println("Signing:", message)
+
+		s.logEntry.Info("Signing:", message)
+
 	}
 
 	h := s.HashFunc().New()
@@ -1169,7 +1202,9 @@ func (s *RSASigner) Sign(message string, tokenSecret string) (string, error) {
 
 	base64signature := base64.StdEncoding.EncodeToString(signature)
 	if s.debug {
-		fmt.Println("Base64 signature:", base64signature)
+
+		s.logEntry.Info("Base64 signature:", base64signature)
+
 	}
 
 	return base64signature, nil
@@ -1177,8 +1212,8 @@ func (s *RSASigner) Sign(message string, tokenSecret string) (string, error) {
 
 func (s *RSASigner) Verify(message string, base64signature string) error {
 	if s.debug {
-		fmt.Println("Verifying:", message)
-		fmt.Println("Verifying Base64 signature:", base64signature)
+		s.logEntry.Info("Verifying:", message)
+		s.logEntry.Info("Verifying Base64 signature:", base64signature)
 	}
 
 	h := s.HashFunc().New()
@@ -1248,8 +1283,9 @@ func (c *Consumer) getBody(method, url string, oauthParams *OrderedParams) (*str
 	}
 	bodyStr := string(bodyBytes)
 	if c.debug {
-		fmt.Printf("STATUS: %d %s\n", resp.StatusCode, resp.Status)
-		fmt.Println("BODY RESPONSE: " + bodyStr)
+		c.logEntry.Infof("STATUS: %d %s\n", resp.StatusCode, resp.Status)
+		c.logEntry.Info("BODY RESPONSE: " + bodyStr)
+
 	}
 	return &bodyStr, nil
 }
@@ -1314,7 +1350,9 @@ func (c *Consumer) httpExecute(
 	}
 
 	if c.debug {
-		fmt.Printf("Request: %v\n", req)
+
+		c.logEntry.Infof("Request: %v\n", req)
+
 	}
 	resp, err := c.HttpClient.Do(req)
 	if err != nil {
